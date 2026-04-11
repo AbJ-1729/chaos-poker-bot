@@ -1,0 +1,14 @@
+# Build output
+build/
+chaos_poker
+
+# Compiled bot binaries (source kept, binaries ignored)
+bots/bad_bot
+bots/example_bot
+bots/random_bot
+bots/my_bot
+
+# Python cache
+bots/__pycache__/
+*.pyc
+*.pyo
