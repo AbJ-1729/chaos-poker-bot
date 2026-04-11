@@ -1,70 +1,39 @@
-# Chaos Poker Take-Home
+# Chaos Poker Bot
 
-Build a bot that plays Chaos Poker.
+**Abhijai Chugh**
 
-## Task
+## Launch command
 
-Implement a bot that communicates with the engine over `stdin` / `stdout` using the protocol in [RULES.md](RULES.md).
+```
+./bots/my_bot
+```
 
-The code in this repository is provided as a **test harness** for local development.
+## Build
 
-If the harness implementation or the message-flow example appear to deviate from [RULES.md](RULES.md), the rules in [RULES.md](RULES.md) should be treated as authoritative.
-
-You may use any language, as long as your bot can be launched from the command line and responds within the time limit.
-
-## Evaluation
-
-Your bot should aim to maximise **match wins**.
-
-We will run the submitted bots through repeated offline evaluations and rank them based on their performance in those tournaments.
-
-We may also assess submissions qualitatively, including the overall quality of the approach and implementation.
-
-## Running the Test Harness
-
-Build the engine and sample bots:
+Requires g++ with C++17 support.
 
 ```bash
 make
 ```
 
-Run a sample 3-player match with hand history output:
+This builds the engine (`chaos_poker`) and all bots under `bots/`, including `bots/my_bot`.
+
+## Run
+
+To test the bot against the provided sample bots:
 
 ```bash
-./chaos_poker --history 1000 5 15 25 50 ./bots/example_bot ./bots/random_bot ./bots/random_bot
+./chaos_poker --history 1000 5 15 25 50 ./bots/my_bot ./bots/example_bot ./bots/random_bot
 ```
 
-## Submission
+## Strategy
 
-Create a private GitHub repository for your work.
+The bot is implemented in C++ (`bots/my_bot.cpp`) to guarantee sub-millisecond startup and response times, safely within the 10 ms per-prompt limit.
 
-Your repository should contain:
+**Betting (ACTION_PROMPT):** Estimates win probability via Monte Carlo simulation (50 runs) against random opponent hands. At preflop, an analytical approximation (based on standard equity tables) replaces Monte Carlo to save time. Raises to ~75% of pot when win probability is high (>75%), calls when expected value is positive against pot odds, and folds otherwise.
 
-- your bot source code
-- a top-level `README.md`
+**Swap (SWAP_PROMPT):** Samples 20 random replacement cards for each hole card and estimates the average improvement in win probability. Swaps the card with the highest expected gain if it exceeds 5 percentage points and the cost is under 15% of stack. Limits to one swap per street phase to avoid chip bleed.
 
-Submission deadlines:
+**Vote (VOTE_PROMPT):** Votes YES if current win probability exceeds the fair-share baseline (1 / players remaining), NO otherwise. Wagers proportional to confidence, capped at 8% of stack.
 
-- Invite `tk-machine-user` with read access by Sunday, April 12, 2026, 23:59 IST so any access or permissions issues can be resolved before the final deadline.
-- Follow up by email with your repository URL and your GitHub username after you have sent the GitHub invitation.
-- Do not make any further changes to your repository after Monday, April 13, 2026, 23:59 IST.
-
-In your repository `README`, include:
-
-- your name
-- the exact command we should use to launch your bot
-- how to build your bot
-- how to run your bot
-- a short note describing your strategy and any tradeoffs
-
-## Questions and Clarifications
-
-If you have questions about the exercise, please raise them as GitHub issues in this repository.
-
-Because this exercise runs over the weekend, you should not depend on receiving a timely answer to any question and should be prepared to make reasonable assumptions and work with uncertainty.
-
-Any official clarifications to the rules will be summarised in this README so you do not need to inspect the commit history to find them.
-
-## Clarifications
-
-- Response timeout: the official time limit is now 10 ms per decision, and the provided test harness has been updated accordingly.
+**Tradeoffs:** Monte Carlo with 50 simulations gives reasonable accuracy but deliberately underestimates variance. The swap and vote logic is intentionally conservative (low wagers, one swap per phase) to avoid losing chips on marginal edges. A more aggressive approach could extract more EV from strong hands at the cost of larger swings.
