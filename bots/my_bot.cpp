@@ -344,18 +344,29 @@ struct GameState {
 // Decision helpers
 // ---------------------------------------------------------------------------
 
+// Number of Monte Carlo simulations to use per street (more cards known → faster → more sims).
+static int mc_sims(int street_idx) {
+    switch (street_idx) {
+        case 1:  return 30;   // flop
+        case 2:  return 40;   // turn
+        case 3:  return 50;   // river
+        default: return 30;
+    }
+}
+
 static std::string decide_action(GameState& st, int chips, int current_bet,
                                   int your_bet, int min_raise, int pot)
 {
     int to_call = current_bet - your_bet;
+    int sims = mc_sims(st.street_idx);
 
     // Must go all-in or fold
     if (to_call >= chips) {
-        double wp = win_probability(st.hole_cards, st.community, st.num_active);
+        double wp = win_probability(st.hole_cards, st.community, st.num_active, sims);
         return (wp > 0.45) ? "ALLIN" : "FOLD";
     }
 
-    double wp = win_probability(st.hole_cards, st.community, st.num_active);
+    double wp = win_probability(st.hole_cards, st.community, st.num_active, sims);
 
     if (to_call == 0) {
         if (wp > 0.65) {
@@ -387,7 +398,8 @@ static std::string decide_swap(GameState& st, int cost, int my_chips, int sample
     if (cost > my_chips * 0.30) return "STAY";
     if ((int)st.hole_cards.size() < 2) return "STAY";
 
-    double cur = win_probability(st.hole_cards, st.community, st.num_active, 20);
+    int sims = mc_sims(st.street_idx);
+    double cur = win_probability(st.hole_cards, st.community, st.num_active, sims);
 
     // Build remaining deck (excluding known cards)
     std::vector<Card> remaining;
@@ -427,16 +439,58 @@ static std::string decide_swap(GameState& st, int cost, int my_chips, int sample
     return "STAY";
 }
 
+// Estimate average win probability if the current street's cards are redrawn.
+// board_cards_kept: community cards from *earlier* streets that survive the redraw
+// (0 for flop vote, 3 for turn vote, 4 for river vote).
+static double estimate_redraw_equity(GameState& st, int board_cards_kept, int simulations = 12) {
+    int cards_to_redraw = (int)st.community.size() - board_cards_kept;
+    if (cards_to_redraw <= 0) return win_probability(st.hole_cards, st.community, st.num_active, simulations);
+
+    // Cards that are definitely unavailable for the redraw draw
+    std::vector<Card> remaining;
+    remaining.reserve(52);
+    for (int i = 0; i < 52; i++) {
+        const Card& c = FULL_DECK[i];
+        bool known = false;
+        for (auto& h : st.hole_cards) if (h == c) { known = true; break; }
+        // Only the kept prior-street community cards are excluded; current-street cards go back
+        if (!known) for (int j = 0; j < board_cards_kept; j++)
+            if (st.community[j] == c) { known = true; break; }
+        if (!known) remaining.push_back(c);
+    }
+
+    double total = 0.0;
+    for (int s = 0; s < simulations; s++) {
+        std::shuffle(remaining.begin(), remaining.end(), RNG);
+        std::vector<Card> sim_comm(st.community.begin(),
+                                   st.community.begin() + board_cards_kept);
+        for (int i = 0; i < cards_to_redraw; i++) sim_comm.push_back(remaining[i]);
+        total += win_probability(st.hole_cards, sim_comm, st.num_active, 10);
+    }
+    return total / simulations;
+}
+
 static std::string decide_vote(GameState& st, int my_chips) {
     if (st.community.empty()) return "VOTE YES 0";
 
-    double wp = win_probability(st.hole_cards, st.community, st.num_active, 20);
-    double baseline = 1.0 / (st.num_active + 1);
-    double confidence = std::abs(wp - baseline);
-    int wager = (int)(my_chips * std::min(0.08, confidence * 0.15));
+    int sims = mc_sims(st.street_idx);
+    double cur_wp = win_probability(st.hole_cards, st.community, st.num_active, sims);
+
+    // How many community cards from prior streets survive a redraw of this street:
+    //   flop vote  (street_idx=1, community.size=3): 0 kept → all 3 redrawn
+    //   turn vote  (street_idx=2, community.size=4): 3 kept → turn card redrawn
+    //   river vote (street_idx=3, community.size=5): 4 kept → river card redrawn
+    int board_cards_kept = (int)st.community.size() - (st.street_idx == 1 ? 3 : 1);
+    board_cards_kept = std::max(0, board_cards_kept);
+
+    double redraw_wp = estimate_redraw_equity(st, board_cards_kept, 12);
+
+    double edge = cur_wp - redraw_wp;
+    double confidence = std::abs(edge);
+    int wager = (int)(my_chips * std::min(0.10, confidence * 0.20));
     wager = std::max(0, wager);
 
-    if (wp >= baseline)
+    if (edge >= 0)
         return "VOTE YES " + std::to_string(wager);
     return "VOTE NO " + std::to_string(wager);
 }
@@ -522,24 +576,25 @@ int main() {
                 st.hole_cards[st.last_swap_idx] = parse_card(c1);
 
         } else if (cmd == "REDRAW_FLOP") {
-            std::string c1, c2, c3;
-            iss >> c1 >> c2 >> c3;
-            st.community = {parse_card(c1), parse_card(c2), parse_card(c3)};
-            st.street_idx = 1;
-
+            // All 3 flop cards replaced; turn/river not yet dealt at this point.
+            std::string c1, c2, c3; iss >> c1 >> c2 >> c3;
+            if ((int)st.community.size() >= 3) {
+                st.community[0] = parse_card(c1);
+                st.community[1] = parse_card(c2);
+                st.community[2] = parse_card(c3);
+            } else {
+                st.community = {parse_card(c1), parse_card(c2), parse_card(c3)};
+            }
         } else if (cmd == "REDRAW_TURN") {
+            // Only the turn card (index 3) is replaced; flop cards stay.
             std::string c1; iss >> c1;
-            Card turn = parse_card(c1);
-            if (st.community.size() >= 4) st.community[3] = turn;
-            else st.community.push_back(turn);
-            st.street_idx = 2;
-
+            if ((int)st.community.size() >= 4) st.community[3] = parse_card(c1);
+            else st.community.push_back(parse_card(c1));
         } else if (cmd == "REDRAW_RIVER") {
+            // Only the river card (index 4) is replaced; flop + turn stay.
             std::string c1; iss >> c1;
-            Card river = parse_card(c1);
-            if (st.community.size() >= 5) st.community[4] = river;
-            else st.community.push_back(river);
-            st.street_idx = 3;
+            if ((int)st.community.size() >= 5) st.community[4] = parse_card(c1);
+            else st.community.push_back(parse_card(c1));
 
         } else if (cmd == "ACTION") {
             // ACTION <seat> <action> [<amount>]
