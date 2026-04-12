@@ -67,9 +67,9 @@ The bot views the chaos vote not just as a way to fix its own hand, but as a wea
 - **Chip Position**: A short-stacked bot will slightly bias votes towards `NO` (increasing variance), while a chip leader biases towards `YES` (forcing stability).
 
 ### 5. High-Fidelity Monte Carlo
-The core engine runs 200–500 simulations per `ACTION_PROMPT` depending on the street:
+The core engine runs 400–1000 simulations per `ACTION_PROMPT` depending on the street:
 - **Preflop**: Fast table-based analytical approximation.
-- **Flop**: 200 sims.
-- **Turn**: 300 sims.
-- **River**: 500 sims.
+- **Flop**: 400 sims.
+- **Turn**: 600 sims.
+- **River**: 1000 sims.
 The C++ implementation ensures these complete almost instantaneously, leaving a wide safety margin. Random jitter (±10%) is applied to all calculated bet sizes to obscure the bot's algorithms from opponents.
