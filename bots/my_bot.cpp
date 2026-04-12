@@ -521,10 +521,25 @@ int main() {
             if (st.last_swap_idx < (int)st.hole_cards.size())
                 st.hole_cards[st.last_swap_idx] = parse_card(c1);
 
-        } else if (cmd == "REDRAW_FLOP" || cmd == "REDRAW_TURN" || cmd == "REDRAW_RIVER") {
-            st.community.clear();
-            std::string c;
-            while (iss >> c) st.community.push_back(parse_card(c));
+        } else if (cmd == "REDRAW_FLOP") {
+            std::string c1, c2, c3;
+            iss >> c1 >> c2 >> c3;
+            st.community = {parse_card(c1), parse_card(c2), parse_card(c3)};
+            st.street_idx = 1;
+
+        } else if (cmd == "REDRAW_TURN") {
+            std::string c1; iss >> c1;
+            Card turn = parse_card(c1);
+            if (st.community.size() >= 4) st.community[3] = turn;
+            else st.community.push_back(turn);
+            st.street_idx = 2;
+
+        } else if (cmd == "REDRAW_RIVER") {
+            std::string c1; iss >> c1;
+            Card river = parse_card(c1);
+            if (st.community.size() >= 5) st.community[4] = river;
+            else st.community.push_back(river);
+            st.street_idx = 3;
 
         } else if (cmd == "ACTION") {
             // ACTION <seat> <action> [<amount>]
