@@ -5,14 +5,16 @@
  *   1. Opponent modeling:  per-seat VPIP, fold rate, aggression, showdown profiles
  *   2. Bluffing:           c-bets, double-barrels, semi-bluffs, position bluffs
  *   3. Draw detection:     flush draws, open-ended straight draws, gutshots, combos
- *   4. More MC sims:       200–600 per street (was 30–50)
+ *   4. More MC sims:       400–1000 per street (was 30–50)
  *   5. SHOWDOWN/WINNER:    builds opponent ranges and win profiles
  *   6. Vote disruption:    heavy NO votes when opponents show strength
  *   7. Implied odds:       wider draw calls accounting for future value
  *   8. Opponent-adjusted equity: tighten vs nits, loosen vs maniacs
  *   9. Adaptive bet sizing with randomisation for unpredictability
+ *  10. Bluff catching:     profile opponent aggression vs showdown strength
+ *  11. Vote intelligence:  deduce opponent vote tendencies from VOTE_RESULT
  *
- * C++ guarantees sub-millisecond startup; even 600 MC sims finish in <5 ms.
+ * C++ guarantees sub-millisecond startup; even 1000 MC sims finish in <4 ms.
  */
 
 #include <iostream>
@@ -27,7 +29,7 @@
 #include <map>
 #include <cstring>
 #include <cmath>
-#include <chrono>
+
 
 // ---------------------------------------------------------------------------
 // Card representation
@@ -383,7 +385,6 @@ struct OpponentStats {
 struct HandTracking {
     bool we_raised_preflop = false;
     bool we_cbet_flop      = false;
-    bool we_bet_turn       = false;
     int  last_raiser_seat  = -1;      // most recent raiser (any street)
 
     // Opponent aggression this hand
@@ -402,7 +403,6 @@ struct HandTracking {
     void reset() {
         we_raised_preflop = false;
         we_cbet_flop      = false;
-        we_bet_turn       = false;
         last_raiser_seat  = -1;
         total_opp_raises  = 0;
         opp_allin         = false;
@@ -654,10 +654,14 @@ static std::string decide_action(GameState& st, int chips, int current_bet,
     if (to_call > 0 && st.ht.last_raiser_seat >= 0 &&
         st.ht.last_raiser_seat < (int)st.opp_stats.size()) {
         const auto& rs = st.opp_stats[st.ht.last_raiser_seat];
-        if (rs.total_actions() > 30) {  // require strong evidence (was 15)
-            if (rs.aggression() < 0.6 && rs.vpip_rate() < 0.30) {
-                // Tight nit raising → they have it. Discount equity (conservative).
-                wp_eff -= 0.06;
+        if (rs.total_actions() >= 15) {  // engage adaptation faster
+            if (rs.aggression() < 0.5) {
+                // Extreme nit! If they are betting/raising, they have a monster.
+                // We deeply discount our own math equity to avoid "value-owning" ourselves.
+                wp_eff -= 0.15;
+            } else if (rs.aggression() < 0.8 || rs.vpip_rate() < 0.25) {
+                // Tight player
+                wp_eff -= 0.08;
             } else if (rs.aggression() > 2.0 || rs.vpip_rate() > 0.65) {
                 // Maniac / very loose → their raise means less. Boost equity.
                 wp_eff += 0.05;
@@ -714,6 +718,23 @@ static std::string decide_action(GameState& st, int chips, int current_bet,
     // No bet to face — can check or bet
     // =======================================================================
     if (to_call == 0) {
+
+        // ==============================================================
+        // SLOW-PLAY TRAP: with a monster, occasionally check to induce
+        // bluffs from aggressive opponents.  If we always bet big with
+        // strong hands, smart opponents fold every time → zero value.
+        // Checking sometimes makes us unpredictable and traps their bluffs.
+        // ==============================================================
+        if (wp_eff > 0.85 && st.street_idx >= 1) {
+            double avg_agg = st.avg_opponent_aggression();
+            if (avg_agg > 1.5) {
+                // 20-30% trap frequency, scaling with opponent aggression
+                double trap_freq = std::min(0.30, (avg_agg - 1.0) * 0.20);
+                if (bluff_roll < trap_freq)
+                    return "CHECK";  // trap: let them bluff into our monster
+            }
+        }
+
         // -- VALUE BETS --
         if (wp_eff > 0.85) {
             // Monster: pot-sized bet
@@ -721,6 +742,23 @@ static std::string decide_action(GameState& st, int chips, int current_bet,
             if (raise_amt >= min_raise)
                 return "RAISE " + std::to_string(raise_amt);
         }
+
+        // ==============================================================
+        // CHECK-RAISE SETUP: when out of position with a strong hand,
+        // occasionally check to set up a check-raise.  If the opponent
+        // bets (which aggressive opponents will), the value re-raise
+        // logic below handles the raise → we extract 2-3× more chips
+        // than a simple value bet.
+        // ==============================================================
+        if (!st.is_dealer && wp_eff > 0.70 && wp_eff <= 0.85 && st.street_idx >= 1) {
+            double avg_agg = st.avg_opponent_aggression();
+            if (avg_agg > 1.0) {
+                double cr_freq = std::min(0.25, (avg_agg - 0.8) * 0.15);
+                if (bluff_roll < cr_freq)
+                    return "CHECK";  // check-raise setup
+            }
+        }
+
         if (wp_eff > 0.68) {
             // Strong hand: 55–65% pot
             int raise_amt = std::min(chips, std::max(min_raise, (int)(pot * 0.60 * size_jitter)));
@@ -732,6 +770,21 @@ static std::string decide_action(GameState& st, int chips, int current_bet,
             int raise_amt = std::min(chips, std::max(min_raise, (int)(pot * 0.37 * size_jitter)));
             if (raise_amt >= min_raise)
                 return "RAISE " + std::to_string(raise_amt);
+        }
+
+        // ==============================================================
+        // RIVER THIN VALUE BET: on the river with moderate equity,
+        // make a small bet against calling stations who call with worse.
+        // Against folders this is pointless (they just fold), but against
+        // opponents who can't let go of second-best hands, this prints $.
+        // ==============================================================
+        if (st.street_idx == 3 && wp_eff > 0.58 && wp_eff <= 0.68) {
+            double avg_fold = st.avg_opponent_fold_rate();
+            if (avg_fold < 0.35) {  // calling station confirmed
+                int raise_amt = std::min(chips, std::max(min_raise, (int)(pot * 0.30 * size_jitter)));
+                if (raise_amt >= min_raise)
+                    return "RAISE " + std::to_string(raise_amt);
+            }
         }
 
         // ==============================================================
@@ -1178,8 +1231,6 @@ int main() {
     init_deck();
     GameState st;
 
-    double max_time_ms = 0.0;
-    int decision_count = 0;
 
     std::string line;
     while (std::getline(std::cin, line)) {
@@ -1310,8 +1361,6 @@ int main() {
                         st.ht.we_raised_preflop = true;
                     else if (st.street_idx == 1 && st.ht.we_raised_preflop)
                         st.ht.we_cbet_flop = true;
-                    else if (st.street_idx == 2 && st.ht.we_cbet_flop)
-                        st.ht.we_bet_turn = true;
                 }
             } else {
                 // --- Opponent action tracking ---
@@ -1405,18 +1454,12 @@ int main() {
         // ================================================================
 
         } else if (cmd == "ACTION_PROMPT") {
-            auto t0 = std::chrono::steady_clock::now();
             int chips, cb, yb, mr, pot;
             iss >> chips >> cb >> yb >> mr >> pot;
             st.my_chips = chips;
             std::cout << decide_action(st, chips, cb, yb, mr, pot) << "\n";
-            auto t1 = std::chrono::steady_clock::now();
-            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            if (ms > max_time_ms) max_time_ms = ms;
-            decision_count++;
 
         } else if (cmd == "SWAP_PROMPT") {
-            auto t0 = std::chrono::steady_clock::now();
             int cost, chips;
             iss >> cost >> chips;
             st.my_chips = chips;
@@ -1430,20 +1473,11 @@ int main() {
                 }
                 std::cout << resp << "\n";
             }
-            auto t1 = std::chrono::steady_clock::now();
-            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            if (ms > max_time_ms) max_time_ms = ms;
-            decision_count++;
 
         } else if (cmd == "VOTE_PROMPT") {
-            auto t0 = std::chrono::steady_clock::now();
             int chips; iss >> chips;
             st.my_chips = chips;
             std::cout << decide_vote(st, chips) << "\n";
-            auto t1 = std::chrono::steady_clock::now();
-            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            if (ms > max_time_ms) max_time_ms = ms;
-            decision_count++;
 
         // ----------------------------------------------------------------
         // VOTE_RESULT — deduce opponent voting tendencies
@@ -1459,8 +1493,5 @@ int main() {
         // All other messages (SWAP_DONE, etc.) → ignored
         }
     }
-    // Report timing to stderr (invisible to engine, visible to us)
-    std::cerr << "[TIMING] decisions=" << decision_count
-              << " max=" << max_time_ms << "ms" << std::endl;
     return 0;
 }

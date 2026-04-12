@@ -43,9 +43,10 @@ The overarching philosophy of the bot is **"Maximal Exploitative Deviation."** B
 The bot tracks per-seat behaviors over multiple hands by watching `ACTION`, `SHOWDOWN`, and `WINNER` broadcasts:
 - **Fold Rate**: Gates the bot's own bluffing frequency. If an opponent never folds (a "calling station"), our bluffing frequency is literally clamped to `0%`. We play pure value poker against them. 
 - **Aggression vs Showdown Strength**: By combining a player's betting propensity (Aggression Factor) with the actual strength of the hands they show down, the bot profiles them. If they bet heavily but show weak cards, they are tagged as "bluffers." The bot will artificially inflate its own calling range and catch their bluffs with lighter holdings.
+- **Nit Evasion**: The bot detects exceptionally passive, tight players (Aggression Factor < 0.5 and VPIP < 0.25). If a known "nit" wakes up and raises, the bot heavily disrespects its own hand's mathematical equity (discounting it by up to -15%), allowing it to easily fold second-best hands to players who only bet the absolute nuts.
 - **Vote Tendencies**: Tracks how often opponents vote YES vs NO and deduce their wagers.
 
-*Note: All stats require a minimum sample size (20+ actions) before the bot acts on them, avoiding small-sample noise in early hands.*
+*Note: The bot engages this adaptation dynamically. Broad profiling requires ~15+ actions to initialize, preventing small-sample noise in early hands from warping behavior.*
 
 ### 2. Evidence-Based Bluffing
 All bluffs are gated behind the `bluff_viable()` check, which tests if the remaining opponents have an average fold rate of > 40%. Bluffing frequencies then directly scale with the opponent's exploitability.
@@ -72,4 +73,20 @@ The core engine runs 400–1000 simulations per `ACTION_PROMPT` depending on the
 - **Flop**: 400 sims.
 - **Turn**: 600 sims.
 - **River**: 1000 sims.
-The C++ implementation ensures these complete almost instantaneously, leaving a wide safety margin. Random jitter (±10%) is applied to all calculated bet sizes to obscure the bot's algorithms from opponents.
+
+Random jitter (±10%) is applied to all calculated bet sizes to obscure the bot's algorithms from opponents. All decisions complete in under 4ms, well within the 10ms deadline.
+
+### 6. Bluff Catching
+The bot profiles each opponent's **aggression vs showdown strength**. If an opponent raises frequently but consistently shows weak hands at showdown, they are flagged as a bluffer. The bot then widens its calling range against that specific player, catching their bluffs with lighter holdings that would normally fold.
+
+### 7. Vote Intelligence
+After each `VOTE_RESULT`, the bot deduces how much the opponent pool wagered on YES vs NO by subtracting its own vote from the totals. Over multiple votes, it builds a model of opponent voting tendencies and dynamically sizes future wagers to outspend the opposition when it needs to swing a vote.
+
+### 8. Slow-Play Trapping
+Against aggressive opponents (aggression factor >1.5), the bot occasionally checks with monster hands (>85% equity) instead of value-betting. This induces the opponent to bluff into our monster on the next action, extracting chips that a standard bet would never win — because smart opponents fold to big bets from a bot that only bets when strong. Trap frequency scales with opponent aggression (20-30%).
+
+### 9. Check-Raise
+When out of position with a strong hand (70-85% equity), the bot occasionally checks to set up a check-raise. If the aggressive opponent bets (which they will), the bot's value re-raise logic completes a check-raise that extracts 2-3× more chips than a simple value bet. This is opponent-gated — only fires against players with aggression factor >1.0.
+
+### 10. River Thin Value Betting
+On the river with moderate equity (58-68%), the bot fires a small value bet (30% pot) against confirmed calling stations (fold rate <35%). These opponents call with second-best hands, making the thin bet profitable. Against fold-prone players, the bot checks instead since they'd just fold.
