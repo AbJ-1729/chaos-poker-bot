@@ -20,13 +20,7 @@ This builds the engine (`chaos_poker`) and all standard C++ bots under `bots/`, 
 
 ## Run
 
-To quickly test the bot against the provided sample bots across 100 hands:
-
-```bash
-./test_run.sh
-```
-
-Or to test a single game:
+To test a single game:
 ```bash
 ./chaos_poker --history 1000 5 15 25 50 ./bots/my_bot ./bots/example_bot ./bots/random_bot
 ```
