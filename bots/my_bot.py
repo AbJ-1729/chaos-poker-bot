@@ -450,8 +450,25 @@ def main():
             if idx < len(state.hole_cards):
                 state.hole_cards[idx] = new_card
 
-        elif msg in ('REDRAW_FLOP', 'REDRAW_TURN', 'REDRAW_RIVER'):
-            state.community = [parse_card(c) for c in parts[1:]]
+        elif msg == 'REDRAW_FLOP':
+            state.community = [parse_card(parts[1]), parse_card(parts[2]), parse_card(parts[3])]
+            state.street = 'FLOP'
+
+        elif msg == 'REDRAW_TURN':
+            turn = parse_card(parts[1])
+            if len(state.community) >= 4:
+                state.community[3] = turn
+            else:
+                state.community.append(turn)
+            state.street = 'TURN'
+
+        elif msg == 'REDRAW_RIVER':
+            river = parse_card(parts[1])
+            if len(state.community) >= 5:
+                state.community[4] = river
+            else:
+                state.community.append(river)
+            state.street = 'RIVER'
 
         elif msg == 'ACTION':
             # ACTION <seat> <action> [<amount>]
